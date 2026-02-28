@@ -10,7 +10,7 @@ pipeline {
     AWS_DEFAULT_REGION = "us-east-1"
     STACK_NAME         = "${env.BRANCH_NAME == 'master' ? 'production-todo-list-aws' : 'staging-todo-list-aws'}"
     PY_VENV      = ".venv"
-    BRANCH_NAME = "develop"
+    BRANCH_NAME = "master"
   }
 
   stages {

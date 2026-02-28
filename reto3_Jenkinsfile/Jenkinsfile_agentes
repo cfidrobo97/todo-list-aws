@@ -12,7 +12,7 @@ pipeline {
     STAGE_ENV          = "${env.BRANCH_NAME == 'master' ? 'production' : 'staging'}"
     OUTPUT_KEY   = "BaseUrlApi"     
     PY_VENV      = ".venv"
-    BRANCH_NAME = "develop"
+    BRANCH_NAME = "master"
   }
 
   stages {

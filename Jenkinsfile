@@ -152,7 +152,7 @@ pipeline {
 
             # Actualiza CHANGELOG.md 
             if [ -f CHANGELOG.md ]; then
-              sed -i '0,/^## [[]1.0.1[]]/s/^## [[]1.0.1[]]/## [1.0.2]/' CHANGELOG.md
+              sed -i '0,/^## [[]1.0.2[]]/s/^## [[]1.0.2[]]/## [1.0.3]/' CHANGELOG.md
               git add CHANGELOG.md
               git commit -m "chore(release): promote and version bump" || true
               git push https://$GITHUB_TOKEN@github.com/cfidrobo97/todo-list-aws.git develop

@@ -1,0 +1,175 @@
+pipeline {
+  agent none
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
+
+  environment {
+    AWS_REGION   = "us-east-1"
+    AWS_DEFAULT_REGION = "us-east-1"
+    STACK_NAME         = "${env.BRANCH_NAME == 'master' ? 'production-todo-list-aws' : 'staging-todo-list-aws'}"
+    PY_VENV      = ".venv"
+    
+  }
+
+  stages {
+
+    stage('Get Code') {
+      agent any
+      steps {
+        sh 'echo "Ejecutando en:"; whoami; hostname'  
+        withCredentials([string(credentialsId: 'github_pat', variable: 'GITHUB_TOKEN')]) {
+          sh '''
+            set -e
+            rm -rf repo && mkdir repo
+            cd repo
+            git clone -b ${BRANCH_NAME} https://$GITHUB_TOKEN@github.com/cfidrobo97/todo-list-aws.git .
+        
+            # Determinamos qué rama del repo de configuración usar
+            if [ "${BRANCH_NAME}" = "master" ]; then
+                CONFIG_ENV="production"
+            else
+                CONFIG_ENV="staging"
+            fi
+            
+            echo "Descargando configuración para entorno: $CONFIG_ENV"
+            
+            # Descarga samconfig.toml
+            curl -L -o samconfig.toml https://raw.githubusercontent.com/cfidrobo97/todo-list-aws-config/refs/heads/${CONFIG_ENV}/samconfig.toml
+
+          '''
+        }
+        stash name: 'repo', includes: 'repo/**'
+      }
+    }
+
+    stage('Static Test') {
+      when { branch 'develop' }
+      agent { label 'static-test' }
+      steps {
+        sh 'echo "Ejecutando en:"; whoami; hostname' 
+        unstash 'repo'
+        sh '''
+          set -e
+          cd repo
+
+          # venv reproducible para el job
+          python3 -m venv ${PY_VENV}
+          ${PY_VENV}/bin/pip install -U pip
+          ${PY_VENV}/bin/pip install flake8 bandit
+
+          mkdir -p reports
+
+          # Flake8 SOLO src/ (no falla aunque haya hallazgos)
+          ${PY_VENV}/bin/python -m flake8 src/ --output-file reports/flake8.txt || true
+
+          # Bandit SOLO src/ (no falla aunque haya hallazgos)
+          ${PY_VENV}/bin/python -m bandit -r src/ -f txt  -o reports/bandit.txt  || true
+        '''
+      }
+
+      post {
+        always {
+          archiveArtifacts artifacts: 'repo/reports/*', allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Deploy') {
+      agent any
+      steps {
+        sh 'echo "Ejecutando en:"; whoami; hostname' 
+        deleteDir() 
+        unstash 'repo'
+        sh '''
+          set -e
+          cd repo
+          sam build
+          sam validate --region "${AWS_REGION}"
+
+          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset
+        '''
+      }
+    }
+
+    stage('Rest Test') {
+      agent { label 'rest-test' }
+      steps {
+        sh 'echo "Ejecutando en:"; whoami; hostname' 
+        unstash 'repo'
+        sh '''
+          set -e
+          cd repo
+          # venv reproducible para el job
+          python3 -m venv ${PY_VENV}
+          ${PY_VENV}/bin/pip install -U pip
+          ${PY_VENV}/bin/pip install -U pytest requests
+
+          # Obtener Base URL desde CloudFormation Outputs
+          BASE_URL=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+            --output text)
+
+          echo "BASE_URL=${BASE_URL}"
+          test -n "$BASE_URL"  # si está vacío, falla
+
+          # Export para que lo use pytest
+          export BASE_URL
+
+          # Ejecutar pruebas de integración segun rama
+          if [ "${BRANCH_NAME}" = "master" ]; then
+              ${PY_VENV}/bin/python -m pytest -s -k "listtodos" test/integration/todoApiTest.py
+          else
+              ${PY_VENV}/bin/python -m pytest -s test/integration/todoApiTest.py
+          fi
+
+        '''
+      }
+    }
+
+    stage('Promote') {
+      when { branch 'develop' }
+      agent any
+      steps {
+        sh 'echo "Ejecutando en:"; whoami; hostname' 
+        withCredentials([string(credentialsId: 'github_pat', variable: 'GITHUB_TOKEN')]) {
+          sh '''
+            set -e
+            rm -rf repo
+            git clone -b develop https://$GITHUB_TOKEN@github.com/cfidrobo97/todo-list-aws.git repo
+            cd repo
+            git config merge.ours.driver true
+            
+            # Config git user para el commit
+            git config user.email "jenkins@local"
+            git config user.name "jenkins"
+
+            git checkout develop
+            git pull
+
+            # Actualiza CHANGELOG.md 
+            if [ -f CHANGELOG.md ]; then
+              sed -i '0,/^## [[]1.0.1[]]/s/^## [[]1.0.1[]]/## [1.0.2]/' CHANGELOG.md
+              git add CHANGELOG.md
+              git commit -m "chore(release): promote and version bump" || true
+              git push https://$GITHUB_TOKEN@github.com/cfidrobo97/todo-list-aws.git develop
+            else
+              echo "CHANGELOG.md no existe, saltando bump."
+            fi
+
+            # Merge develop -> master
+            git fetch origin
+            git checkout master || git checkout -b master origin/master
+            git pull origin master
+
+            git merge --no-ff develop -m "chore(release): promote develop to master"
+            git push https://$GITHUB_TOKEN@github.com/cfidrobo97/todo-list-aws.git master
+          '''
+        }
+      }
+    }
+  }
+}
